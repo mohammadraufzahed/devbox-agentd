@@ -1,0 +1,10 @@
+[Unit]
+Description=devbox-agentd API socket
+
+[Socket]
+ListenStream=%t/devbox-agentd/agent.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
