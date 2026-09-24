@@ -1,0 +1,27 @@
+{
+	"name": "pi-devbox-agentd",
+	"version": "0.1.0",
+	"description": "Pi extension for devbox-agentd — run commands, services, pty sessions and git inside Devbox project environments via a persistent daemon.",
+	"keywords": ["pi-package"],
+	"license": "MIT",
+	"type": "module",
+	"pi": {
+		"extensions": ["./index.ts"],
+		"skills": ["./skills"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@types/node": "*",
+		"typebox": "*",
+		"typescript": "*"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit"
+	}
+}
