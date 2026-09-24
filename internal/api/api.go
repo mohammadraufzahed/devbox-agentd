@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"devbox-agentd/internal/rpc"
@@ -122,6 +123,25 @@ func runCmd(ctx context.Context, ws *state.Workspace, command string) *exec.Cmd 
 	return c
 }
 
+// setupProcGroup puts the command in its own process group so
+// killOnCancel can reap wrapper children (devbox, sh) and grandchildren
+// together — CommandContext alone only kills the direct child.
+func setupProcGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// killOnCancel kills the whole process group when ctx is done. Call after
+// cmd.Start().
+func killOnCancel(ctx context.Context, cmd *exec.Cmd) {
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+		}
+	}()
+}
+
 // shellQuote single-quotes s for POSIX shell embedding.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -206,11 +226,13 @@ func (a *API) ExecRun(ctx context.Context, conn *rpc.Conn, params json.RawMessag
 	cmd := runCmd(ctx, ws, p.Command)
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	setupProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
 		return nil, rpc.Errf(rpc.CodeInternal, "start: %v", err)
 	}
+	killOnCancel(ctx, cmd)
 
 	copyDone := make(chan struct{})
 	go func() {
@@ -320,6 +342,7 @@ func (a *API) startServiceProc(_ context.Context, _ *rpc.Conn, svc *state.Servic
 	pw := &fanoutWriter{svc: svc}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	setupProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return rpc.Errf(rpc.CodeInternal, "start service: %v", err)
 	}

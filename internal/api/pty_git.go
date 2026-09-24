@@ -54,9 +54,11 @@ func (a *API) PtyOpen(ctx context.Context, conn *rpc.Conn, params json.RawMessag
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
+	setupProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, rpc.Errf(rpc.CodeInternal, "pty start: %v", err)
 	}
+	killOnCancel(ctx, cmd)
 	pty.Attach(stdinW, cmd.Process, out)
 	a.st.PutPty(pty)
 

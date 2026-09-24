@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -89,11 +90,13 @@ func (p *Pty) WriteStdin(b []byte) error {
 // Output returns the pty output ring buffer.
 func (p *Pty) Output() *Ring { return p.output }
 
-// Kill terminates the pty process. Safe to call multiple times.
+// Kill terminates the pty process group. Safe to call multiple times.
 func (p *Pty) Kill() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.proc != nil {
+		// Processes are started with Setpgid — kill the group too.
+		_ = syscall.Kill(-p.proc.Pid, syscall.SIGKILL)
 		_ = p.proc.Kill()
 	}
 	if p.stdin != nil {
@@ -154,12 +157,13 @@ func (svc *Service) PushLog(chunk string) {
 	}
 }
 
-// Kill terminates the service process and marks it stopped. Safe to call
-// multiple times.
+// Kill terminates the service process group and marks it stopped. Safe
+// to call multiple times.
 func (svc *Service) Kill() {
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	if svc.proc != nil {
+		_ = syscall.Kill(-svc.proc.Pid, syscall.SIGKILL)
 		_ = svc.proc.Kill()
 	}
 	svc.Running = false
