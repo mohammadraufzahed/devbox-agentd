@@ -1,0 +1,93 @@
+name: release
+
+# Tag a release:  git tag v0.2.0 && git push --tags
+# The tag MUST match the version pinned in pi/client.ts (DAEMON_VERSION)
+# and cmd/devbox-agentd/main.go — this workflow fails otherwise, so the
+# shipped binaries and the extension can never drift apart.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          MAIN=$(grep -oP 'var version = "\K[^"]+' cmd/devbox-agentd/main.go)
+          CLIENT=$(grep -oP 'DAEMON_VERSION = "\K[^"]+' pi/client.ts)
+          echo "tag=$TAG main.go=$MAIN client.ts=$CLIENT"
+          [ "$TAG" = "$MAIN" ] || { echo "::error::tag != main.go version ($TAG != $MAIN)"; exit 1; }
+          [ "$TAG" = "$CLIENT" ] || { echo "::error::tag != client.ts DAEMON_VERSION ($TAG != $CLIENT)"; exit 1; }
+
+  build:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build static binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=$VERSION" \
+            -o "dist/devbox-agentd" ./cmd/devbox-agentd
+      - name: Package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          cd dist
+          tar -czf "../devbox-agentd_${VERSION}_${GOOS}_${GOARCH}.tar.gz" devbox-agentd
+          cd ..
+          sha256sum "devbox-agentd_${VERSION}_${GOOS}_${GOARCH}.tar.gz" >> "checksums_${GOOS}_${GOARCH}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            devbox-agentd_*.tar.gz
+            checksums_*.txt
+
+  release:
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+      - name: Merge checksums
+        run: |
+          cat checksums_*.txt | sort -u > checksums.txt
+          cat checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "devbox-agentd $GITHUB_REF_NAME" \
+            --generate-notes \
+            devbox-agentd_*.tar.gz checksums.txt

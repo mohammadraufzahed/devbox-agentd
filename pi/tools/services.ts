@@ -27,12 +27,28 @@ export function serviceTools(client: DevboxClient) {
 			name: "devbox_service_start",
 			label: "Devbox: start service",
 			description:
-				"Start a named long-running service (e.g. a dev server) in the workspace's devbox environment. Survives the current Pi session.",
+				"Start a named long-running service (e.g. a dev server) in the workspace's devbox environment. Survives the current Pi session. portEnv assigns a free TCP port into that env var — avoids collisions across worktrees.",
 			promptSnippet: "devbox_service_start — start a named long-running service",
 			executionMode: "sequential",
 			parameters: Type.Object({
 				name: nameProp,
 				command: Type.String({ description: "Command to run" }),
+				cwd: Type.Optional(
+					Type.String({ description: "Working directory relative to the workspace root" }),
+				),
+				env: Type.Optional(
+					Type.Record(Type.String(), Type.String(), {
+						description: "Extra environment variables (preferred over embedding secrets in the command)",
+					}),
+				),
+				portEnv: Type.Optional(
+					Type.String({
+						description: "Env var name (e.g. PORT) — daemon assigns a free TCP port into it",
+					}),
+				),
+				port: Type.Optional(
+					Type.Number({ description: "Explicit port to assign (must be free)" }),
+				),
 				workspace: WorkspaceProp,
 			}),
 			async execute(_id, params, signal, _onUpdate, ctx) {
@@ -42,6 +58,10 @@ export function serviceTools(client: DevboxClient) {
 						{
 							name: params.name,
 							command: params.command,
+							cwd: params.cwd,
+							env: params.env,
+							portEnv: params.portEnv,
+							port: params.port,
 							workspace: wsRoot(params.workspace, ctx.cwd),
 						},
 						{ signal },
@@ -78,6 +98,37 @@ export function serviceTools(client: DevboxClient) {
 					await call(
 						"service.restart",
 						{ name: params.name, workspace: wsRoot(params.workspace, ctx.cwd) },
+						{ signal },
+					),
+				);
+			},
+		}),
+		defineTool({
+			name: "devbox_service_wait",
+			label: "Devbox: wait for service",
+			description:
+				"Block until a service is running (optionally accepting TCP connections on port) or timeoutSec elapses. Returns the service snapshot including detected listening ports.",
+			promptSnippet: "devbox_service_wait — block until a service is ready",
+			parameters: Type.Object({
+				name: nameProp,
+				port: Type.Optional(
+					Type.Number({ description: "Require this TCP port to accept connections" }),
+				),
+				timeoutSec: Type.Optional(
+					Type.Number({ description: "Max seconds to wait (default 30)" }),
+				),
+				workspace: WorkspaceProp,
+			}),
+			async execute(_id, params, signal, _onUpdate, ctx) {
+				return jsonResult(
+					await call(
+						"service.wait",
+						{
+							name: params.name,
+							port: params.port,
+							timeoutSec: params.timeoutSec,
+							workspace: wsRoot(params.workspace, ctx.cwd),
+						},
 						{ signal },
 					),
 				);
