@@ -65,7 +65,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ needs.verify-version.outputs.version }}
         run: |
-          TGZ="../devbox-agentd_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
+          TGZ="devbox-agentd_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
           tar -czf "$TGZ" -C dist devbox-agentd
           sha256sum "$TGZ" >> "checksums_${GOOS}_${GOARCH}.txt"
       # v4
