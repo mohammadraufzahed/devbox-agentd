@@ -3,6 +3,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,14 +25,76 @@ type Workspace struct {
 
 // Exec is a finished or running exec.run invocation.
 type Exec struct {
-	ID        string    `json:"id"`
-	Workspace string    `json:"workspace"`
-	Command   string    `json:"command"`
-	StartedAt time.Time `json:"startedAt"`
-	ExitCode  *int      `json:"exitCode,omitempty"`
-	Done      bool      `json:"done"`
-	Output    *Ring     `json:"-"`
+	ID         string     `json:"id"`
+	Workspace  string     `json:"workspace"`
+	Command    string     `json:"command"`
+	Cwd        string     `json:"cwd,omitempty"`
+	Background bool       `json:"background,omitempty"`
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	DurationMs int64      `json:"durationMs,omitempty"`
+	ExitCode   *int       `json:"exitCode,omitempty"`
+	TimedOut   bool       `json:"timedOut,omitempty"`
+	Signal     string     `json:"signal,omitempty"`
+	Done       bool       `json:"done"`
+	Output     *Ring      `json:"-"`
+
+	mu     sync.Mutex
+	doneCh chan struct{}
+	cancel context.CancelFunc
 }
+
+// NewExec returns an Exec with its done channel ready.
+func NewExec(id, workspace, command string) *Exec {
+	return &Exec{
+		ID:        id,
+		Workspace: workspace,
+		Command:   command,
+		StartedAt: time.Now(),
+		Output:    NewRing(ExecBufCap),
+		doneCh:    make(chan struct{}),
+	}
+}
+
+// ExecBufCap is the per-exec (and per-service, per-pty) output buffer cap
+// in bytes. Only the tail is kept; older output is dropped.
+const ExecBufCap = 4 * 1024 * 1024
+
+// AttachCancel records the cancel func that kills this exec.
+func (e *Exec) AttachCancel(cancel context.CancelFunc) {
+	e.mu.Lock()
+	e.cancel = cancel
+	e.mu.Unlock()
+}
+
+// Cancel kills a running exec. Safe to call multiple times.
+func (e *Exec) Cancel() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cancel != nil {
+		e.cancel()
+	}
+}
+
+// Finish records completion and wakes exec.wait callers.
+func (e *Exec) Finish(code int, timedOut bool, sig string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.Done {
+		return
+	}
+	now := time.Now()
+	e.ExitCode = &code
+	e.Done = true
+	e.TimedOut = timedOut
+	e.Signal = sig
+	e.FinishedAt = &now
+	e.DurationMs = now.Sub(e.StartedAt).Milliseconds()
+	close(e.doneCh)
+}
+
+// DoneChan closes when the exec finishes.
+func (e *Exec) DoneChan() <-chan struct{} { return e.doneCh }
 
 // Follow is a service-logs follower registered by the api layer.
 type Follow struct {
@@ -41,14 +104,21 @@ type Follow struct {
 
 // Service is a managed long-running process.
 type Service struct {
-	Name      string    `json:"name"`
-	Workspace string    `json:"workspace"`
-	Command   string    `json:"command"`
-	Running   bool      `json:"running"`
-	PID       int       `json:"pid,omitempty"`
-	StartedAt time.Time `json:"startedAt,omitempty"`
-	ExitCode  *int      `json:"exitCode,omitempty"`
-	Logs      *Ring     `json:"-"`
+	Name         string            `json:"name"`
+	Workspace    string            `json:"workspace"`
+	Command      string            `json:"command"`
+	Cwd          string            `json:"cwd,omitempty"`
+	PortEnv      string            `json:"portEnv,omitempty"` // env var the daemon injected Port into
+	Port         int               `json:"port,omitempty"`    // assigned or requested port
+	Running      bool              `json:"running"`
+	PID          int               `json:"pid,omitempty"`
+	StartedAt    time.Time         `json:"startedAt,omitempty"`
+	EndedAt      *time.Time        `json:"endedAt,omitempty"`
+	ExitCode     *int              `json:"exitCode,omitempty"`
+	RestartCount int               `json:"restartCount,omitempty"`
+	Ports        []int             `json:"ports,omitempty"`
+	Logs         *Ring             `json:"-"`
+	Env          map[string]string `json:"-"` // never serialized — may carry secrets
 
 	mu      sync.Mutex
 	proc    *os.Process
@@ -123,6 +193,47 @@ func (svc *Service) Exited(code int) {
 	defer svc.mu.Unlock()
 	svc.Running = false
 	svc.ExitCode = &code
+	now := time.Now()
+	svc.EndedAt = &now
+}
+
+// UptimeS returns seconds since start, or 0 when not running.
+func (svc *Service) UptimeS() int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if !svc.Running {
+		return 0
+	}
+	return int(time.Since(svc.StartedAt).Seconds())
+}
+
+// Snapshot returns the service fields plus computed uptime.
+func (svc *Service) Snapshot() map[string]any {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return map[string]any{
+		"name":         svc.Name,
+		"workspace":    svc.Workspace,
+		"command":      svc.Command,
+		"running":      svc.Running,
+		"pid":          svc.PID,
+		"startedAt":    svc.StartedAt,
+		"endedAt":      svc.EndedAt,
+		"exitCode":     svc.ExitCode,
+		"uptimeS":      svc.uptimeLocked(),
+		"restartCount": svc.RestartCount,
+		"ports":        svc.Ports,
+		"cwd":          svc.Cwd,
+		"portEnv":      svc.PortEnv,
+		"port":         svc.Port,
+	}
+}
+
+func (svc *Service) uptimeLocked() int {
+	if !svc.Running {
+		return 0
+	}
+	return int(time.Since(svc.StartedAt).Seconds())
 }
 
 // AddFollow registers a log follower; returns an unregister func.
@@ -197,6 +308,21 @@ func (r *Ring) Bytes() []byte {
 	return append([]byte(nil), r.buf...)
 }
 
+// Event is a daemon lifecycle notification published on the event bus.
+type Event struct {
+	Type      string         `json:"type"` // exec.done, service.exited, service.started, pty.exited, workspace.destroyed
+	Workspace string         `json:"workspace,omitempty"`
+	ID        string         `json:"id,omitempty"`   // exec or pty id
+	Name      string         `json:"name,omitempty"` // service name
+	Data      map[string]any `json:"data,omitempty"`
+	At        time.Time      `json:"at"`
+}
+
+// Subscriber receives events; C is buffered and drops when full.
+type Subscriber struct {
+	C chan Event
+}
+
 // Store is the daemon state container.
 type Store struct {
 	mu         sync.Mutex
@@ -204,6 +330,7 @@ type Store struct {
 	execs      map[string]*Exec
 	services   map[string]*Service // keyed root+"\x00"+name
 	ptys       map[string]*Pty
+	subs       map[*Subscriber]struct{}
 	seq        atomic.Uint64
 }
 
@@ -214,6 +341,37 @@ func NewStore() *Store {
 		execs:      map[string]*Exec{},
 		services:   map[string]*Service{},
 		ptys:       map[string]*Pty{},
+		subs:       map[*Subscriber]struct{}{},
+	}
+}
+
+// Publish broadcasts an event to all subscribers (non-blocking).
+func (s *Store) Publish(ev Event) {
+	ev.At = time.Now()
+	s.mu.Lock()
+	subs := make([]*Subscriber, 0, len(s.subs))
+	for sub := range s.subs {
+		subs = append(subs, sub)
+	}
+	s.mu.Unlock()
+	for _, sub := range subs {
+		select {
+		case sub.C <- ev:
+		default: // drop for slow subscribers
+		}
+	}
+}
+
+// Subscribe registers an event subscriber; returns an unsubscribe func.
+func (s *Store) Subscribe() (*Subscriber, func()) {
+	sub := &Subscriber{C: make(chan Event, 128)}
+	s.mu.Lock()
+	s.subs[sub] = struct{}{}
+	s.mu.Unlock()
+	return sub, func() {
+		s.mu.Lock()
+		delete(s.subs, sub)
+		s.mu.Unlock()
 	}
 }
 
@@ -340,6 +498,19 @@ func (s *Store) GetExec(id string) (*Exec, bool) {
 	defer s.mu.Unlock()
 	e, ok := s.execs[id]
 	return e, ok
+}
+
+// ListExecs returns all execs, or those of one workspace.
+func (s *Store) ListExecs(root string) []*Exec {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*Exec
+	for _, e := range s.execs {
+		if root == "" || e.Workspace == root {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // PutService stores svc under its workspace+name key.

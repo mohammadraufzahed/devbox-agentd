@@ -17,6 +17,8 @@ import { execTools } from "./tools/exec.js";
 import { serviceTools } from "./tools/services.js";
 import { ptyTools } from "./tools/pty.js";
 import { gitTools } from "./tools/git.js";
+import { fsTools } from "./tools/fs.js";
+import { eventTools } from "./tools/events.js";
 
 /** Tools that mutate state destructively — confirmed in UI, blocked otherwise. */
 const DESTRUCTIVE = new Set([
@@ -24,9 +26,28 @@ const DESTRUCTIVE = new Set([
 	"devbox_service_restart",
 	"devbox_git_reset",
 	"devbox_git_checkout",
+	"devbox_git_push",
+	"devbox_exec_cancel",
 	"devbox_workspace_destroy",
 	"devbox_pty_kill",
 ]);
+
+/**
+ * NeedsConfirm reports whether a tool call requires confirmation — the
+ * DESTRUCTIVE set plus param-sensitive cases (e.g. stash drop, git push
+ * is always in the set anyway).
+ */
+function needsConfirm(toolName: string, input: unknown): boolean {
+	if (DESTRUCTIVE.has(toolName)) return true;
+	if (toolName === "devbox_git_stash") {
+		const action = (input as { action?: string })?.action;
+		if (action === "drop" || action === "pop") return true;
+	}
+	if (toolName === "devbox_git_branch") {
+		if ((input as { delete?: boolean })?.delete) return true;
+	}
+	return false;
+}
 
 interface WorkspaceInfo {
 	root: string;
@@ -52,12 +73,14 @@ export default function (pi: ExtensionAPI) {
 	for (const t of serviceTools(client)) pi.registerTool(t);
 	for (const t of ptyTools(client)) pi.registerTool(t);
 	for (const t of gitTools(client)) pi.registerTool(t);
+	for (const t of fsTools(client)) pi.registerTool(t);
+	for (const t of eventTools(client)) pi.registerTool(t);
 
 	// --- session lifecycle ---
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await client.ensureAndConnect();
-			const ws = await client.call<WorkspaceInfo>("workspace.open", { root: ctx.cwd });
+			const ws = await client.call<WorkspaceInfo>("workspace.bind", { root: ctx.cwd });
 			boundWorkspace = ws;
 			if (ctx.hasUI) {
 				ctx.ui.setStatus("devbox", `devbox: ${ws.name}`);
@@ -80,7 +103,7 @@ export default function (pi: ExtensionAPI) {
 	// --- destructive confirmation gate ---
 	// Fail closed: without a dialog-capable UI there is no way to confirm.
 	pi.on("tool_call", async (event, ctx) => {
-		if (!DESTRUCTIVE.has(event.toolName)) return;
+		if (!needsConfirm(event.toolName, event.input)) return;
 		if (!ctx.hasUI) {
 			return {
 				block: true,

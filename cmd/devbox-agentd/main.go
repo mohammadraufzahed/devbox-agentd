@@ -30,7 +30,10 @@ import (
 	"devbox-agentd/internal/state"
 )
 
-const version = "0.1.0"
+// version is the daemon version; release builds override it via
+// -ldflags "-X main.version=<tag>". Keep in sync with DAEMON_VERSION in
+// pi/client.ts — the release workflow enforces the match.
+var version = "0.2.0"
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))

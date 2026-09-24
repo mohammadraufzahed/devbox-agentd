@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // Version is the JSON-RPC protocol version string used on the wire.
@@ -129,10 +130,23 @@ type Conn struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+
+	boundWS atomic.Value // string — workspace bound via workspace.bind
 }
 
 func newConn(c net.Conn, s *Server) *Conn {
 	return &Conn{c: c, s: s, bw: bufio.NewWriter(c), cancels: map[string]context.CancelFunc{}}
+}
+
+// SetBoundWorkspace pins this connection's default workspace root.
+func (conn *Conn) SetBoundWorkspace(root string) { conn.boundWS.Store(root) }
+
+// BoundWorkspace returns the connection's bound workspace root, or "".
+func (conn *Conn) BoundWorkspace() string {
+	if v := conn.boundWS.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // Notify writes a JSON-RPC notification (no id) on the connection.

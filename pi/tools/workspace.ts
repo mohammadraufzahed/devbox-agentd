@@ -33,6 +33,19 @@ export function workspaceTools(client: DevboxClient) {
 			},
 		}),
 		defineTool({
+			name: "devbox_workspace_bind",
+			label: "Devbox: bind workspace",
+			description:
+				"Pin this session's default workspace so calls without a workspace param resolve to it — gives each agent session its own worktree when several share the daemon.",
+			promptSnippet: "devbox_workspace_bind — pin the session's default workspace",
+			parameters: Type.Object({
+				root: Type.String({ description: "Workspace root path" }),
+			}),
+			async execute(_id, params, _signal, _onUpdate, _ctx) {
+				return jsonResult(await call("workspace.bind", { root: params.root }));
+			},
+		}),
+		defineTool({
 			name: "devbox_workspace_destroy",
 			label: "Devbox: destroy workspace",
 			description:
