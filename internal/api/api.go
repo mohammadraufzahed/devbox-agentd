@@ -398,7 +398,7 @@ func (a *API) ExecRun(ctx context.Context, conn *rpc.Conn, params json.RawMessag
 		_ = pw.Close()
 		return nil, rpc.Errf(rpc.CodeInternal, "start: %v", err)
 	}
-	killOnCancel(ctx, cmd)
+	killOnCancel(runCtx, cmd)
 
 	reqID := rpc.ReqID(ctx)
 	copyDone := make(chan struct{})
